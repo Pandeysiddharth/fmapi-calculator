@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FMAPI pricing calculator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-title">
+    <h1>FMAPI pricing calculator</h1>
+    <p class="topbar-sub">Databricks Standard Pay Per Token, GPT and Claude. Serving cost only, in USD. Token inputs in thousands. Runs entirely in your browser; nothing you enter is sent anywhere.</p>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-reset" class="btn btn-quiet" type="button">Reset to defaults</button>
+    <button id="btn-xlsx" class="btn" type="button">Download Excel</button>
+    <button id="btn-pdf" class="btn btn-primary" type="button">Download PDF</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="layout">
+
+  <!-- ====================== Scenario rail ====================== -->
+  <aside class="rail" aria-label="Scenario controls">
+    <section class="rail-group">
+      <h2>Model</h2>
+      <label class="field">
+        <span>Model</span>
+        <select id="f-model"></select>
+      </label>
+      <p id="model-note" class="field-note"></p>
+      <label class="field">
+        <span>Context pricing band</span>
+        <select id="f-band">
+          <option value="Short">Short</option>
+          <option value="Long">Long</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>USD per DBU</span>
+        <input id="f-usd-dbu" type="number" step="0.001" min="0">
+      </label>
+      <label class="field field-check">
+        <input id="f-regional" type="checkbox">
+        <span>Regional processing uplift <small id="regional-note"></small></span>
+      </label>
+      <label class="field">
+        <span>Billing months per year</span>
+        <input id="f-months" type="number" step="1" min="0">
+      </label>
+    </section>
+
+    <section class="rail-group">
+      <h2>Tokens</h2>
+      <label class="field">
+        <span>Token units in usage table</span>
+        <select id="f-units">
+          <option value="Thousands">Thousands (6.5 = 6,500 tokens)</option>
+          <option value="Tokens">Tokens (literal)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Additional input tokens per query</span>
+        <input id="f-extra" type="number" step="1" min="0">
+        <small>System prompt, tools, history or retrieved context not in the usage table. Actual tokens, never scaled.</small>
+      </label>
+      <label class="field">
+        <span>Cache screening threshold (tokens)</span>
+        <input id="f-threshold" type="number" step="1" min="0">
+      </label>
+    </section>
+
+    <section class="rail-group">
+      <h2>Prompt caching</h2>
+      <label class="field">
+        <span>Input tokens billed as cache reads <output id="o-read"></output></span>
+        <input id="f-read" type="range" min="0" max="100" step="1">
+        <small>Share of all input tokens, not a request hit rate. 0% is the honest baseline. This models billing; it does not enable caching.</small>
+      </label>
+      <div id="claude-controls">
+        <label class="field">
+          <span>Cache writes, % of non-read input <output id="o-write"></output></span>
+          <input id="f-write" type="range" min="0" max="100" step="1">
+          <small>Claude only. Written tokens replace ordinary input for those tokens.</small>
+        </label>
+        <label class="field">
+          <span>Cache-write duration</span>
+          <select id="f-duration">
+            <option value="Default">Default</option>
+            <option value="1hr">1 hour</option>
+          </select>
+        </label>
+      </div>
+      <p id="write-status" class="field-note"></p>
+    </section>
+
+    <section class="rail-group rail-rates">
+      <h2>Effective rates, USD per 1M tokens</h2>
+      <dl id="rate-list" class="rate-list"></dl>
+    </section>
+  </aside>
+
+  <!-- ====================== Results ====================== -->
+  <div class="content">
+
+    <section class="headline" id="headline">
+      <div class="headline-main">
+        <p class="headline-label">Portfolio cost per month</p>
+        <p class="headline-figure" id="h-monthly">—</p>
+        <p class="headline-meta" id="h-meta"></p>
+      </div>
+      <dl class="headline-stats">
+        <div><dt>Per year</dt><dd id="h-annual">—</dd></div>
+        <div><dt>Without caching</dt><dd id="h-nocache">—</dd></div>
+        <div><dt>Savings from caching</dt><dd id="h-savings">—</dd></div>
+        <div><dt>Clients entered</dt><dd id="h-clients">—</dd></div>
+        <div><dt>Queries per month</dt><dd id="h-queries">—</dd></div>
+        <div><dt>Tokens per month</dt><dd id="h-tokens">—</dd></div>
+      </dl>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>Cost by user tier</h2>
+        <div class="seg" role="group" aria-label="Ladder basis">
+          <button type="button" data-basis="client" class="on">Per client</button>
+          <button type="button" data-basis="portfolio">Portfolio</button>
+        </div>
+      </div>
+      <p class="block-sub">Monthly serving cost for <span id="ladder-model"></span>. The solid bar is the cost with the caching assumptions above; the outline shows the no-cache baseline.</p>
+      <div id="ladder" class="ladder"></div>
+    </section>
+
+    <section class="block" id="compare-block">
+      <div class="block-head">
+        <h2>Compare models</h2>
+        <div class="compare-add">
+          <select id="f-compare-add" aria-label="Add a model to compare"></select>
+          <button id="btn-compare-add" class="btn btn-small" type="button">Add</button>
+        </div>
+      </div>
+      <p class="block-sub">Price the same workload on up to five models side by side. Uses the context band, DBU price and caching assumptions from the rail. The cheapest priced model is the reference for the ratio column.</p>
+      <div id="compare-chips" class="chips"></div>
+      <div id="compare-empty" class="empty">Add two or more models to compare them here.</div>
+      <div id="compare-body" hidden>
+        <div class="table-wrap">
+          <table id="compare-summary" class="grid">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h3 class="sub-head">Monthly cost per client by tier</h3>
+        <div id="compare-bars" class="cmp-bars"></div>
+        <div class="table-wrap">
+          <table id="compare-tiers" class="grid">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+            <tfoot></tfoot>
+          </table>
+        </div>
+        <h3 class="sub-head">Portfolio cost per month at different cache-read shares</h3>
+        <div class="table-wrap">
+          <table id="compare-cache" class="grid">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>User tiers</h2>
+        <button id="btn-add-tier" class="btn btn-quiet btn-small" type="button">Add tier</button>
+      </div>
+      <p class="block-sub">Queries are per client per month. Mix percentages must total 100%. Client counts drive the portfolio totals; the workbook defaults to one client per tier.</p>
+      <div class="table-wrap">
+        <table id="tier-table" class="grid">
+          <thead>
+            <tr>
+              <th class="l">User tier</th>
+              <th>Queries / client / mo</th>
+              <th>Simple %</th>
+              <th>Medium %</th>
+              <th>Complex %</th>
+              <th>Clients</th>
+              <th>Tokens / mo</th>
+              <th>Cost / client / mo</th>
+              <th>No-cache / mo</th>
+              <th>Savings</th>
+              <th>Cost / client / yr</th>
+              <th>Portfolio / mo</th>
+              <th>Portfolio / yr</th>
+              <th>DBU / client / mo</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Complexity profiles</h2></div>
+      <p class="block-sub">Tokens per query in thousands by default (6.5 = 6,500 tokens); switch the unit in the rail if your figures are literal counts. The planning check flags inputs under the screening threshold; it is a caution, not a per-model eligibility rule.</p>
+      <div class="table-wrap">
+        <table id="cx-table" class="grid">
+          <thead>
+            <tr>
+              <th class="l">Complexity</th>
+              <th>Input / query</th>
+              <th>Output / query</th>
+              <th>Actual input</th>
+              <th>Actual output</th>
+              <th>Total tokens</th>
+              <th>No-cache USD / query</th>
+              <th>With-cache USD / query</th>
+              <th class="l">Cache planning check</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>Same workload on every model</h2>
+        <label class="field-inline"><input id="f-cmp-provider" type="checkbox"> Group by provider</label>
+      </div>
+      <p class="block-sub">Portfolio cost per month if this exact workload ran on each model. Click a row to make it the selected model. Claude write settings are ignored for GPT rows; regional uplift applies only to eligible models.</p>
+      <div class="table-wrap">
+        <table id="cmp-table" class="grid grid-click">
+          <thead>
+            <tr>
+              <th class="l">Model</th>
+              <th class="l">Provider</th>
+              <th>Input USD/M</th>
+              <th>Output USD/M</th>
+              <th>Cache read USD/M</th>
+              <th>Cache write USD/M</th>
+              <th>Portfolio / mo, no cache</th>
+              <th>Portfolio / mo, with cache</th>
+              <th>Savings %</th>
+              <th>Portfolio / yr</th>
+              <th class="l">Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Cache sensitivity</h2></div>
+      <p class="block-sub">Portfolio cost for the selected model at different token-weighted cache-read shares, holding the Claude write share constant. These are scenarios, not guarantees.</p>
+      <div class="table-wrap">
+        <table id="cache-table" class="grid">
+          <thead>
+            <tr>
+              <th>Cache-read share</th>
+              <th>Portfolio / mo</th>
+              <th>Portfolio / yr</th>
+              <th>Monthly savings</th>
+              <th>Savings %</th>
+              <th>Blended input USD/M</th>
+              <th>Output / mo (unchanged)</th>
+              <th>Cache-write / mo</th>
+              <th>Write share of all input</th>
+              <th class="l">Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block block-split">
+      <div>
+        <div class="block-head"><h2>Integrity checks</h2></div>
+        <ul id="checks" class="checks"></ul>
+      </div>
+      <div>
+        <div class="block-head"><h2>Reading these numbers</h2></div>
+        <ul class="notes">
+          <li>Cost = ordinary input × input rate + cache-read input × read rate + cache-write input × write rate + output × output rate, each token count divided by 1,000,000.</li>
+          <li>Caching shares describe how tokens are billed. They do not configure an endpoint or guarantee cache support. Measure cached tokens ÷ total input tokens before budgeting savings.</li>
+          <li>With Claude, a positive read share and zero writes is a warmed-cache period, not a full lifecycle budget. Writes can make savings negative.</li>
+          <li>"Not priced" means a cache-write price this scenario needs is not listed in the rate snapshot. It is never treated as free.</li>
+          <li>Excludes app compute, storage, network, taxes, tool and search fees, and commercial margin. Output assumptions should cover all billable output, including reasoning tokens where charged.</li>
+          <li id="rate-footnote"></li>
+        </ul>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js" defer></script>
+<script src="rates.js"></script>
+<script src="engine.js"></script>
+<script src="export.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
